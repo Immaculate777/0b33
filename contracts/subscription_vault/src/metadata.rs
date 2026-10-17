@@ -279,12 +279,6 @@ pub fn validate_metadata_input(
     validate_utf8_string(key, "metadata key")?;
     validate_utf8_string(value, "metadata value")?;
 
-    // Reject null bytes explicitly. `\0` is valid UTF-8 but terminates
-    // C-style strings in downstream systems, so it must not appear in
-    // metadata keys or values (issue #300).
-    reject_null_bytes(key, "metadata key")?;
-    reject_null_bytes(value, "metadata value")?;
-
     let keys: Vec<String> = env
         .storage()
         .persistent()
@@ -459,6 +453,16 @@ fn validate_utf8_string(s: &String, _field_name: &str) -> Result<(), Error> {
     s.copy_into_slice(&mut raw);
     let text = core::str::from_utf8(&raw).map_err(|_| Error::InvalidInput)?;
 
+    // Reject null bytes (issue #300). `\0` is valid UTF-8 but terminates
+    // C-style strings in downstream systems, silently truncating values.
+    // The allowed character set is: any valid UTF-8 sequence that contains
+    // no NUL byte, no control characters other than tab (0x09), newline
+    // (0x0A), and carriage return (0x0D), and at least one printable
+    // (>= 0x20) non-whitespace character.
+    if text.bytes().any(|byte| byte == 0) {
+        return Err(Error::InvalidInput);
+    }
+
     // Reject control characters (except tab/newline/CR) and require at least
     // one printable, non-whitespace character.
     let mut has_non_control_char = false;
@@ -474,24 +478,6 @@ fn validate_utf8_string(s: &String, _field_name: &str) -> Result<(), Error> {
         return Err(Error::InvalidInput);
     }
 
-    Ok(())
-}
-
-/// Rejects strings containing a null byte (`\0`).
-///
-/// Null bytes are valid UTF-8, so [`validate_utf8_string`] alone cannot
-/// catch them. They are rejected here because downstream systems that treat
-/// metadata as C-style strings would silently truncate at the first `\0`.
-///
-/// # Errors
-/// * `Error::InvalidInput` - If the string contains a null byte
-fn reject_null_bytes(s: &String, _field_name: &str) -> Result<(), Error> {
-    let len = s.len() as usize;
-    let mut raw = vec![0u8; len];
-    s.copy_into_slice(&mut raw);
-    if raw.contains(&0u8) {
-        return Err(Error::InvalidInput);
-    }
     Ok(())
 }
 
@@ -539,8 +525,14 @@ mod utf8_validation_tests {
     fn rejects_null_bytes_in_values() {
         let env = Env::default();
         let value = String::from_str(&env, "abc\0def");
-        assert!(reject_null_bytes(&value, "metadata value").is_err());
-        assert!(validate_metadata_input(&env, 1, &String::from_str(&env, "k"), &value).is_err());
+        assert!(validate_utf8_string(&value, "metadata value").is_err());
+    }
+
+    #[test]
+    fn rejects_null_bytes_in_keys() {
+        let env = Env::default();
+        let key = String::from_str(&env, "key\0name");
+        assert!(validate_utf8_string(&key, "metadata key").is_err());
     }
 }
 
